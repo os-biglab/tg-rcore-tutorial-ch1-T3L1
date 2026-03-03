@@ -13,7 +13,7 @@
 
 - 学：读本文件，了解相关OS知识，在某个开发环境（在线或本地）中正确编译运行rcore-tutorial-ch1
 - 教：分析并改进rcore-tutorial-ch1的文档和代码，让自己更高效地完成本章学习。
-- 用：基于rcore-tutorial-ch1的源代码，用gpu framebuffer 显示以代码中的数组表示的七巧板图形信息，形成七巧板构成的“O”和“S”图案。
+- 用：基于rcore-tutorial-ch1的源代码，用gpu framebuffer 显示以代码中的数组表示的七巧板图形信息，形成七巧板构成的“O”和“S”图案。[demo](https://github.com/rcore-os/tg-rcore-tutorial-game-demo/blob/main/ch1-tangram.png)
 
 注：与AI充分合作，并保存与AI合作的交互过程，总结如何做到与AI合作提升自己的操作系统知识与能力。
 
