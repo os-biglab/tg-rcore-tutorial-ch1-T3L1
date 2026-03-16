@@ -9,7 +9,7 @@ homepage = "https://github.com/os-biglab/tg-rcore-tutorial-ch1-T3L1/tree/test"
 documentation = "https://github.com/os-biglab/tg-rcore-tutorial-ch1-T3L1/tree/test/docs"
 license = "GPL-3.0"
 readme = "README.md"
-keywords = ["ai","ai4ose","kernel","learning","os","rcore", "tutorial", "no-std", "riscv", "bare-metal"]
+keywords = ["ai","ai4ose","kernel","learning","os"]
 categories = ["no-std", "embedded"]
 
 [profile.dev]
