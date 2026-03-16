@@ -27,6 +27,102 @@
 // 引入 SBI 调用库，提供 console_putchar（输出字符）和 shutdown（关机）功能
 // 启用 nobios 特性后，tg_sbi 内建了 M-mode 启动代码，无需外部 SBI 固件
 use tg_sbi::{console_putchar, shutdown};
+#[cfg(target_arch = "riscv64")]
+use virtio_drivers::{Hal, MmioTransport, PhysAddr, VirtAddr, VirtIOGpu, VirtIOHeader};
+
+#[cfg(target_arch = "riscv64")]
+mod tangram;
+
+#[cfg(target_arch = "riscv64")]
+const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
+
+#[cfg(target_arch = "riscv64")]
+const VIRTIO_MMIO_STRIDE: usize = 0x1000;
+
+#[cfg(target_arch = "riscv64")]
+const VIRTIO_MMIO_COUNT: usize = 8;
+
+#[cfg(target_arch = "riscv64")]
+const DMA_PAGE_SIZE: usize = 4096;
+
+#[cfg(target_arch = "riscv64")]
+const DMA_POOL_PAGES: usize = 2048;
+
+#[cfg(target_arch = "riscv64")]
+const FRAMEBUFFER_BACKGROUND: u32 = 0xff1d2128;
+
+#[cfg(target_arch = "riscv64")]
+const DEFAULT_WIDTH: usize = 1280;
+
+#[cfg(target_arch = "riscv64")]
+const DEFAULT_HEIGHT: usize = 800;
+
+#[cfg(target_arch = "riscv64")]
+const HEAP_SIZE: usize = 2 * 1024 * 1024;
+
+#[cfg(target_arch = "riscv64")]
+#[repr(align(4096))]
+struct DmaPool([u8; DMA_POOL_PAGES * DMA_PAGE_SIZE]);
+
+#[cfg(target_arch = "riscv64")]
+#[repr(align(4096))]
+struct KernelHeap([u8; HEAP_SIZE]);
+
+#[cfg(target_arch = "riscv64")]
+#[unsafe(link_section = ".bss.uninit")]
+static mut DMA_POOL: DmaPool = DmaPool([0; DMA_POOL_PAGES * DMA_PAGE_SIZE]);
+
+#[cfg(target_arch = "riscv64")]
+#[unsafe(link_section = ".bss.uninit")]
+static mut KERNEL_HEAP: KernelHeap = KernelHeap([0; HEAP_SIZE]);
+
+#[cfg(target_arch = "riscv64")]
+static DMA_NEXT_PAGE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(target_arch = "riscv64")]
+struct SimpleHal;
+
+#[cfg(target_arch = "riscv64")]
+impl Hal for SimpleHal {
+    fn dma_alloc(pages: usize) -> PhysAddr {
+        use core::sync::atomic::Ordering;
+
+        if pages == 0 {
+            return 0;
+        }
+
+        loop {
+            let current = DMA_NEXT_PAGE.load(Ordering::Relaxed);
+            let next = match current.checked_add(pages) {
+                Some(v) => v,
+                None => return 0,
+            };
+            if next > DMA_POOL_PAGES {
+                return 0;
+            }
+            if DMA_NEXT_PAGE
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
+                let base = unsafe { core::ptr::addr_of_mut!(DMA_POOL.0) as usize };
+                return base + current * DMA_PAGE_SIZE;
+            }
+        }
+    }
+
+    fn dma_dealloc(_paddr: PhysAddr, _pages: usize) -> i32 {
+        0
+    }
+
+    fn phys_to_virt(paddr: PhysAddr) -> VirtAddr {
+        paddr
+    }
+
+    fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
+        vaddr
+    }
+}
 
 /// S 态程序入口点。
 ///
@@ -58,15 +154,101 @@ unsafe extern "C" fn _start() -> ! {
     )
 }
 
-/// S 态主函数：打印 "Hello, world!" 并关机。
-///
-/// 通过 SBI 的 `console_putchar` 逐字节输出字符串，
-/// 然后调用 `shutdown` 正常关机退出 QEMU。
+/// S 态主函数：初始化 VirtIO-GPU，渲染静态七巧板 “OS” 图案。
 extern "C" fn rust_main() -> ! {
-    for c in b"Hello, world!\n" {
+    #[cfg(target_arch = "riscv64")]
+    {
+        init_allocator();
+        puts(b"[ch1-T3L1] init virtio-gpu...\n");
+
+        let gpu_mmio = match find_virtio_gpu_mmio() {
+            Some(addr) => addr,
+            None => panic!("virtio-gpu mmio not found"),
+        };
+        let transport = unsafe {
+            MmioTransport::new(core::ptr::NonNull::new(gpu_mmio as *mut VirtIOHeader).unwrap())
+        }
+        .unwrap_or_else(|_| panic!("failed to create MmioTransport"));
+        let mut gpu = match VirtIOGpu::<SimpleHal, MmioTransport>::new(transport) {
+            Ok(gpu) => gpu,
+            Err(_) => panic!("failed to create VirtIOGpu"),
+        };
+
+        let (width, height, framebuffer_len) = {
+            let framebuffer = match gpu.setup_framebuffer() {
+                Ok(buf) => buf,
+                Err(_) => panic!("failed to setup framebuffer"),
+            };
+
+            let width = DEFAULT_WIDTH;
+            let height = DEFAULT_HEIGHT;
+            let visible_len = width.saturating_mul(height).saturating_mul(4);
+            let framebuffer_len = framebuffer.len().min(visible_len);
+
+            clear_framebuffer(framebuffer, framebuffer_len, FRAMEBUFFER_BACKGROUND);
+            tangram::render_os_tangram(framebuffer, width, height);
+
+            (width, height, framebuffer_len)
+        };
+
+        if gpu.flush().is_err() {
+            panic!("failed to flush framebuffer");
+        }
+
+        puts(b"[ch1-T3L1] tangram rendered. polling GPU...\n");
+        let _ = (width, height, framebuffer_len);
+        loop {
+            let _ = gpu.ack_interrupt();
+            core::hint::spin_loop();
+        }
+    }
+
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        for c in b"Hello, world!\n" {
+            console_putchar(*c);
+        }
+        shutdown(false)
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn puts(s: &[u8]) {
+    for c in s {
         console_putchar(*c);
     }
-    shutdown(false) // false 表示正常关机
+}
+
+#[cfg(target_arch = "riscv64")]
+fn clear_framebuffer(framebuffer: &mut [u8], len: usize, color: u32) {
+    let pixel = color.to_le_bytes();
+    for chunk in framebuffer[..len].chunks_exact_mut(4) {
+        chunk.copy_from_slice(&pixel);
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn init_allocator() {
+    let heap_ptr = unsafe { core::ptr::addr_of_mut!(KERNEL_HEAP.0) as *mut u8 };
+    tg_kernel_alloc::init(heap_ptr as usize);
+    unsafe {
+        tg_kernel_alloc::transfer(core::slice::from_raw_parts_mut(heap_ptr, HEAP_SIZE));
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn find_virtio_gpu_mmio() -> Option<usize> {
+    const VIRTIO_MAGIC: u32 = 0x7472_6976;
+    const DEVICE_ID_GPU: u32 = 16;
+    for slot in 0..VIRTIO_MMIO_COUNT {
+        let base = VIRTIO_MMIO_BASE + slot * VIRTIO_MMIO_STRIDE;
+        let magic = unsafe { (base as *const u32).read_volatile() };
+        let device_id = unsafe { ((base + 0x008) as *const u32).read_volatile() };
+        if magic == VIRTIO_MAGIC && device_id == DEVICE_ID_GPU {
+            return Some(base);
+        }
+    }
+    None
 }
 
 /// panic 处理函数。
