@@ -24,9 +24,14 @@
 // 非 RISC-V64 架构允许死代码（用于 cargo publish --dry-run 在主机上通过编译）
 #![cfg_attr(not(target_arch = "riscv64"), allow(dead_code))]
 
+#[macro_use]
+extern crate tg_console;
+
 // 引入 SBI 调用库，提供 console_putchar（输出字符）和 shutdown（关机）功能
 // 启用 nobios 特性后，tg_sbi 内建了 M-mode 启动代码，无需外部 SBI 固件
-use tg_sbi::{console_putchar, shutdown};
+#[cfg(target_arch = "riscv64")]
+use tg_console::log;
+use tg_sbi::shutdown;
 #[cfg(target_arch = "riscv64")]
 use virtio_drivers::{Hal, MmioTransport, PhysAddr, VirtAddr, VirtIOGpu, VirtIOHeader};
 
@@ -138,8 +143,8 @@ impl Hal for SimpleHal {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 unsafe extern "C" fn _start() -> ! {
-    // 栈大小：4 KiB
-    const STACK_SIZE: usize = 4096;
+    // 栈大小：8 页（32 KiB）
+    const STACK_SIZE: usize = 8 * 4096;
 
     // 在 .bss.uninit 段中分配栈空间
     #[unsafe(link_section = ".bss.uninit")]
@@ -156,10 +161,14 @@ unsafe extern "C" fn _start() -> ! {
 
 /// S 态主函数：初始化 VirtIO-GPU，渲染静态七巧板 “OS” 图案。
 extern "C" fn rust_main() -> ! {
+    tg_console::init_console(&impls::Console);
+    tg_console::set_log_level(option_env!("LOG"));
+    tg_console::test_log();
+
     #[cfg(target_arch = "riscv64")]
     {
         init_allocator();
-        puts(b"[ch1-T3L1] init virtio-gpu...\n");
+        log::info!("[ch1-T3L1] init virtio-gpu...");
 
         let gpu_mmio = match find_virtio_gpu_mmio() {
             Some(addr) => addr,
@@ -195,7 +204,7 @@ extern "C" fn rust_main() -> ! {
             panic!("failed to flush framebuffer");
         }
 
-        puts(b"[ch1-T3L1] tangram rendered. polling GPU...\n");
+        log::info!("[ch1-T3L1] tangram rendered. polling GPU...");
         let _ = (width, height, framebuffer_len);
         loop {
             let _ = gpu.ack_interrupt();
@@ -206,16 +215,9 @@ extern "C" fn rust_main() -> ! {
     #[cfg(not(target_arch = "riscv64"))]
     {
         for c in b"Hello, world!\n" {
-            console_putchar(*c);
+            tg_sbi::console_putchar(*c);
         }
         shutdown(false)
-    }
-}
-
-#[cfg(target_arch = "riscv64")]
-fn puts(s: &[u8]) {
-    for c in s {
-        console_putchar(*c);
     }
 }
 
@@ -255,8 +257,21 @@ fn find_virtio_gpu_mmio() -> Option<usize> {
 ///
 /// `#![no_std]` 环境下必须自行实现。发生 panic 时以异常状态关机。
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("{info}");
     shutdown(true) // true 表示异常关机
+}
+
+mod impls {
+    /// 控制台实现：通过 SBI 逐字符输出。
+    pub(crate) struct Console;
+
+    impl tg_console::Console for Console {
+        #[inline]
+        fn put_char(&self, c: u8) {
+            tg_sbi::console_putchar(c);
+        }
+    }
 }
 
 /// 非 RISC-V64 架构的占位模块。

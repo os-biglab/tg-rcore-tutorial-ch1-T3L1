@@ -19,6 +19,7 @@ panic = "abort"
 panic = "abort"
 
 [dependencies]
+tg-console = { package = "tg-rcore-tutorial-console", version = "0.4.8" }
 tg-sbi = { package = "tg-rcore-tutorial-sbi", version = "0.4.8", features = ["nobios"] }
 tg-kernel-alloc = { package = "tg-rcore-tutorial-kernel-alloc", version = "0.4.5" }
 virtio-drivers = { package = "virtio-drivers", version = "0.1.0" }
